@@ -1,7 +1,7 @@
 # MGM-AES
 A contermeasure against DL-based SCA
 
-Both MGM and XMGM are implemented on the chipWhisper CW303.
+Both MGM and XMGM are implemented on the chipWhisper CW303 and sampled by CW-Lite.
 
 MGM.c: The main body of the AES-MGM implementation
 
