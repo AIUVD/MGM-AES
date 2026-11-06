@@ -16,3 +16,5 @@ Cipher1.h: head file
 Cipher1.S: masked AES encryption function in assembly format
 
 simpleserial-aes.c: Initialization before sampling, including generating random masks
+
+The CNN folder contains files used for netrual network attacks.
