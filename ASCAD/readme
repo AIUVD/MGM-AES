@@ -1,0 +1,83 @@
+# CW303 ASCAD 风格掩码 AES 采集包
+
+本目录保存 CW303/XMEGA 上用于功耗采集的 C、AVR 汇编、Makefile 与 Python 采集脚本。这里的实现是 Boolean masked C experiment v1，属于 ASCAD 风格实验实现，**不是原版 ASCAD Version 1 的固件复刻**。
+
+## 文件说明
+
+| 文件                           | 作用                                                         |
+| ------------------------------ | ------------------------------------------------------------ |
+| `ascad_capture.c`              | SimpleSerial 1.1 固件入口，接收密钥、掩码和明文，控制 trigger 并返回密文 |
+| `ascad_masked_experiment.c/.h` | 掩码 AES 实验核心、状态与轮密钥准备接口                      |
+| `ascad_substitute.S`           | 被测 S 盒替换函数的 AVR 汇编实现                             |
+| `Makefile.ascad_capture`       | 将上述固件编译为 CW303/XMEGA 固件                            |
+| `ascad_capture.py`             | 配置采样、烧录 HEX、发送输入、验证密文并写入 HDF5            |
+
+编译依赖 ChipWhisperer 固件源码树中的 `Makefile.inc`、CW303 HAL 和 SimpleSerial 1.1。采集脚本依赖 Python 包 `chipwhisperer`、`numpy`、`h5py`、`pycryptodome`。
+
+## 编译、烧录与采集
+
+先把本目录中的六个程序文件复制到虚拟机的 ChipWhisperer 固件目录：
+
+```bash
+~/chipwhisperer/hardware/victims/firmware/simpleserial-aes
+```
+
+在虚拟机终端进入该目录，清理旧构建并重新编译：
+
+```bash
+cd ~/chipwhisperer/hardware/victims/firmware/simpleserial-aes
+make -f Makefile.ascad_capture clean
+make -f Makefile.ascad_capture PLATFORM=CW303
+```
+
+成功后会生成 `ascad_capture-CW303.hex`。将 CW303 连接好，在同一目录运行采集脚本。脚本默认先烧录该 HEX，再做 FIPS 197 AES-128 已知答案自检；通过后开始正式采集。示例使用固定密钥、随机明文和逐条更新的随机掩码，输出文件名应按每次实验另取：
+
+```bash
+python ascad_capture.py \
+  --waves 50000 \
+  --samples 15000 \
+  --decimate 1 \
+  --key 2b7e151628aed2a6abf7158809cf4f3c \
+  --output ascad_capture/model-key-2b7e-50000.h5
+```
+
+不要给 `--output` 指定已存在的文件。省略 `--key` 时使用脚本默认密钥 `0d0e0f00090a0b0c0506070801020304`。省略 `--no-program` 时会自动烧录；只有确认板上已烧录同一版本 HEX 时才使用 `--no-program`。
+
+自检采用 FIPS 197 附录 C.1 的 AES-128 示例向量。正式采集中的每条设备密文还会与 PyCryptodome 的 AES 结果逐条比较；超时、密文不匹配或无效波形会停止采集，不保存失败记录。
+
+## Trigger 范围
+
+当前 `ascad_capture.c` 在 `trigger_high()` 前完成密钥扩展和明文拆分；trigger 高电平内调用 `ascad_masked_experiment_encrypt_state_prepared()`，包括初始 AddRoundKey、AES 轮运算和最终密文解掩码。密钥扩展、S 盒表准备及明文拆分不在该 C 入口所描述的 trigger 区间内。
+
+采样窗长度是 `samples × decimate` 个 ADC 采样时钟。`full_window` 标志由固件 trigger 持续时间和采样窗计算；为 `False` 表示该 trace 没有覆盖完整 trigger，只能按实际采样窗解释，不能称为完整加密过程曲线。
+
+## HDF5 数据集
+
+Python 文件按 `(曲线数, 每条宽度)` 写入。当前默认配置下 `traces` 为 `(N, 15000)`；MATLAB 的 `h5disp` 可能以相反的维度顺序显示。
+
+| 数据集           |           形状 | 类型      | 内容                                                   |
+| ---------------- | -------------: | --------- | ------------------------------------------------------ |
+| `traces`         | `(N, samples)` | `float32` | ChipWhisperer ADC 归一化幅度，不是焦耳或校准功率       |
+| `plaintext`      |      `(N, 16)` | `uint8`   | 每条明文                                               |
+| `ciphertext`     |      `(N, 16)` | `uint8`   | 每条设备输出密文                                       |
+| `key`            |      `(N, 16)` | `uint8`   | 每条实际使用的 AES 密钥；固定密钥采集时各行相同        |
+| `masks`          |      `(N, 34)` | `uint8`   | 每条实际发送的 34 字节随机量                           |
+| `trigger_cycles` |         `(N,)` | `uint64`  | ChipWhisperer 记录的 trigger 持续时间，单位为 ADC 时钟 |
+| `full_window`    |         `(N,)` | `bool`    | 采样窗是否覆盖完整 trigger                             |
+
+掩码列按从 0 开始的索引解释：`0:16` 是 16 个状态掩码，`16` 是 S 盒输入掩码 `im`，`17` 是 S 盒输出掩码 `om`，`18:34` 是 16 个轮密钥掩码。随机数由主机 Python 的 `secrets.token_bytes()`（操作系统 CSPRNG）生成，不是 CW303 板载 TRNG。
+
+文件属性还记录实现标识、随机源说明、掩码布局、trigger 区域描述、采样数、偏移、抽取率、ADC/目标时钟频率、密钥/明文模式、ChipWhisperer 版本、固件路径、采集数量和 `complete` 状态。`num_captured` 是有效记录数量；异常退出后只应读取前 `num_captured` 行。`complete=True` 表示达到请求的条数，不表示采样窗覆盖完整 trigger。
+
+## 现有数据与分析记录
+
+本包放在 `F:\data\ASCAD\cw303_capture_package`，不会覆盖该目录中的原始 HDF5 或 MATLAB 分析文件。检查时发现：
+
+| 文件       | 曲线数 × 采样点 | 固定密钥                           | `complete` | `full_window` |
+| ---------- | --------------: | ---------------------------------- | ---------- | ------------- |
+| `10000.h5` | `10000 × 15000` | `7c2b591d446e829035710f26a48b539c` | True       | 全部 False    |
+| `50000.h5` | `50000 × 15000` | `2b7e151628aed2a6abf7158809cf4f3c` | True       | 全部 False    |
+
+现有分析文件：`first-round-10000_HW_NICV_CPA.mat`。
+
+根据当前已有的 CPA/NICV 分析，最多 50,000 条曲线未能恢复正确密钥。这表示在已测试的实现、采样窗、泄漏模型和攻击流程下未观察到成功恢复密钥的结果；它是经验性评估，不构成对所有泄漏、攻击模型或实现环境的绝对安全证明。
