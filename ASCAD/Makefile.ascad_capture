@@ -1,0 +1,25 @@
+# Run from ~/chipwhisperer/hardware/victims/firmware/simpleserial-aes.
+FIRMWAREPATH ?= ..
+PLATFORM = CW303
+TARGET = ascad_capture
+OPT = s
+CRYPTO_TARGET = NONE
+SS_VER = SS_VER_1_1
+override OBJDIR = objdir-ascad-capture-$(PLATFORM)
+.DEFAULT_GOAL := capture
+
+SRC += ascad_capture.c ascad_masked_experiment.c ascad_substitute.S
+EXTRAINCDIRS += .
+include $(FIRMWAREPATH)/Makefile.inc
+
+# Avoid upstream recursive "all", which loses -f and selects the timing Makefile.
+.PHONY: capture
+capture: hex
+$(OBJ): | .dep
+
+# WinAVR compatibility; omit the optional assembler listing flag, whose automatic
+# variable would otherwise be expanded before the compiler rule runs. No LTO.
+override CFLAGS := $(filter-out -Wa% -Wno-discarded-qualifiers -Wno-unused-function -Wno-unused-variable -Wno-strict-prototypes -Wno-missing-prototypes -Wno-pointer-sign -Wno-unused-value -Wno-implicit-function-declaration,$(CFLAGS))
+ifeq ($(OS),Windows_NT)
+SHELL = cmd.exe
+endif
